@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Стрелялка — 6 уровней + Босс (Alya Style)</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; font-family: monospace; }
+    #bg {
+      position: fixed; inset: 0;
+      background-image: url('alya.jpg');
+      background-size: cover; background-position: center; background-repeat: no-repeat;
+      z-index: 0;
+    }
+    #bg.fallback { background-color: #0a0c14; }
+    #game-wrap {
+      position: relative; z-index: 1; width: 100%; height: 100%;
+      display: flex; justify-content: center; align-items: center;
+    }
+    canvas {
+      background: rgba(10, 12, 20, 0.45);
+      border: 2px solid #c0c8d8;
+      box-shadow: 0 0 40px rgba(0,0,0,0.7);
+    }
+    #info {
+      color: #e8eef8; position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      text-align: center; font-size: 14px; z-index: 2;
+      background: rgba(10,12,20,0.6); padding: 4px 12px; border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="info">← → двигаться, Пробел — стрелять, R — заново, Esc — меню</div>
+  <div id="game-wrap">
+    <canvas id="game" width="480" height="600"></canvas>
+  </div>
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const bgDiv = document.getElementById('bg');
+    const testImg = new Image(); testImg.src = 'alya.jpg';
+    testImg.onerror = () => bgDiv.classList.add('fallback');
+
+    const COLOR = {
+      bg: '#0a0c14', accentSilver: '#c0c8d8', accentBlue: '#4a7ab8',
+      accentRed: '#b83a4a', text: '#e8eef8',
+      enemy1: '#b83a4a', enemy2: '#4a7ab8', enemy3: '#c0c8d8',
+      player: '#e8eef8', bullet: '#ffd700', boss: '#ff44aa', bossBullet: '#ffaa00'
+    };
+
+    const STATE = { MENU:'menu', PLAY:'play', GAMEOVER:'gameover', LEVEL_COMPLETE:'levelcomplete', VICTORY:'victory', SHOP:'shop' };
+    let state = STATE.MENU;
+
+    const RECORD_KEY = 'shooter_alya_record_v7';
+    const MAXLEVEL_KEY = 'shooter_alya_maxlevel_v7';
+    let record = parseInt(localStorage.getItem(RECORD_KEY) || '0', 10);
+    let maxLevelReached = parseInt(localStorage.getItem(MAXLEVEL_KEY) || '1', 10);
+
+    let mode = 'campaign';
+
+    const LEVELS = [
+      { name: 1, enemySpeed: 0.7, spawnInterval: 1100, scorePerKill: 10, enemiesToWin: 8,  boss: false },
+      { name: 2, enemySpeed: 0.9, spawnInterval: 950,  scorePerKill: 10, enemiesToWin: 10, boss: false },
+      { name: 3, enemySpeed: 1.3, spawnInterval: 800,  scorePerKill: 15, enemiesToWin: 12, boss: false },
+      { name: 4, enemySpeed: 1.7, spawnInterval: 650,  scorePerKill: 20, enemiesToWin: 15, boss: false },
+      { name: 5, enemySpeed: 2.2, spawnInterval: 500,  scorePerKill: 25, enemiesToWin: 18, boss: false },
+      { name: 6, enemySpeed: 2.2, spawnInterval: 800,  scorePerKill: 30, enemiesToWin: 0,  boss: true  }
+    ];
+    let currentLevel = 0;
+    let scoreAtLevelStart = 0;
+
+    let score = 0, lives = 3, killed = 0;
+    let gameOver = false, levelComplete = false, victory = false;
+
+    let bullets = [], enemies = [], powerups = [];
+    let doubleShotTimer = 0, tripleShotTimer = 0, shieldTimer = 0;
+
+    let boughtLives = 0, boughtShield = 0, boughtDouble = 0, boughtTriple = 0;
+
+    let endlessTime = 0, endlessSpeed = 1.0, endlessSpawn = 900, endlessAccelTimer = null;
+
+    let boss = null;
+    let bossBullets = [];
+
+    const player = { x: 240, y: 560, w: 30, h: 20, speed: 6 };
+    let keys = {};
+    let spawnTimer = null, powerupTimer = null, globalTimer = null, bossTimer = null;
+
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space') e.preventDefault();
+      keys[e.code] = true;
+      if (state === STATE.MENU) {
+        if (e.code === 'Digit1') startGame('campaign');
+        if (e.code === 'Digit2') startGame('endless');
+        if (e.code === 'KeyC') { record = 0; saveRecord(); }
+        return;
+      }
+      if (state === STATE.SHOP) {
+        if (e.code === 'Digit1') buy('life');
+        if (e.code === 'Digit2') buy('shield');
+        if (e.code === 'Digit3') buy('double');
+        if (e.code === 'Digit4') buy('triple');
+        if (e.code === 'Enter') goNextLevelFromShop();
+        if (e.code === 'Escape') toMenu();
+        return;
+      }
+      if (e.code === 'Escape') { toMenu(); return; }
+      if (e.code === 'Space') shoot();
+      if (state === STATE.PLAY || state === STATE.GAMEOVER) { if (e.code === 'KeyR') restartCurrent(); }
+      else if (state === STATE.LEVEL_COMPLETE) { if (e.code === 'KeyN') openShop(); if (e.code === 'KeyR') restartCurrent(); }
+      else if (state === STATE.VICTORY) { if (e.code === 'KeyR') restartCurrent(); }
+    });
+    document.addEventListener('keyup', e => keys[e.code] = false);
+
+    function saveRecord() {
+      localStorage.setItem(RECORD_KEY, String(record));
+      localStorage.setItem(MAXLEVEL_KEY, String(maxLevelReached));
+    }
+    function updateRecord() {
+      if (score > record) { record = score; saveRecord(); }
+      if (mode === 'campaign' && LEVELS[currentLevel].name > maxLevelReached) { maxLevelReached = LEVELS[currentLevel].name; saveRecord(); }
+    }
+
+    function toMenu() {
+      state = STATE.MENU; stopAllTimers();
+      bullets = []; enemies = []; powerups = []; bossBullets = []; boss = null;
+    }
+    function stopAllTimers() {
+      if (spawnTimer) clearInterval(spawnTimer);
+      if (powerupTimer) clearInterval(powerupTimer);
+      if (endlessAccelTimer) clearInterval(endlessAccelTimer);
+      if (globalTimer) clearInterval(globalTimer);
+      if (bossTimer) clearInterval(bossTimer);
+      spawnTimer = powerupTimer = endlessAccelTimer = globalTimer = bossTimer = null;
+    }
+
+    function startGame(m) {
+      mode = m; currentLevel = 0; score = 0; scoreAtLevelStart = 0; lives = 3;
+      gameOver = false; levelComplete = false; victory = false;
+      endlessTime = 0; endlessSpeed = 1.0; endlessSpawn = 900;
+      boughtLives = 0; boughtShield = 0; boughtDouble = 0; boughtTriple = 0;
+      boss = null; bossBullets = [];
+      state = STATE.PLAY; resetLevelState();
+    }
+
+    function resetLevelState() {
+      bullets = []; enemies = []; powerups = []; bossBullets = []; boss = null;
+      killed = 0; player.x = 240;
+      doubleShotTimer = boughtDouble * 10;
+      tripleShotTimer = boughtTriple * 8;
+      shieldTimer = boughtShield * 10;
+      gameOver = false; levelComplete = false;
+      stopAllTimers();
+      if (mode === 'campaign' && LEVELS[currentLevel].boss) {
+        startBoss();
+      } else {
+        startSpawner();
+      }
+      startPowerupSpawner();
+      startGlobalTimer(); // ВАЖНО: перезапускается каждый раз
+    }
+
+    function restartCurrent() {
+      if (mode === 'campaign') {
+        score = scoreAtLevelStart; lives = 3; state = STATE.PLAY; resetLevelState();
+      } else { startGame('endless'); }
+    }
+
+    function openShop() {
+      if (mode === 'endless') { state = STATE.PLAY; resetLevelState(); return; }
+      if (currentLevel >= LEVELS.length - 1) {
+        victory = true; state = STATE.VICTORY; stopAllTimers(); return;
+      }
+      state = STATE.SHOP;
+    }
+
+    function goNextLevelFromShop() {
+      if (mode === 'campaign') {
+        currentLevel++; scoreAtLevelStart = score; state = STATE.PLAY; resetLevelState();
+      }
+    }
+
+    function buy(item) {
+      const PRICES = { life: 50, shield: 40, double: 60, triple: 80 };
+      const price = PRICES[item];
+      if (score < price) return;
+      if (item === 'life') {
+        if (lives >= 5) return;
+        score -= price; lives = Math.min(5, lives + 1);
+      } else if (item === 'shield') { score -= price; boughtShield++; }
+      else if (item === 'double') { score -= price; boughtDouble++; }
+      else if (item === 'triple') { score -= price; boughtTriple++; }
+    }
+
+    function startSpawner() {
+      if (spawnTimer) clearInterval(spawnTimer);
+      if (mode === 'campaign') {
+        const lvl = LEVELS[currentLevel];
+        spawnTimer = setInterval(() => {
+          if (state !== STATE.PLAY) return;
+          spawnEnemy(lvl.enemySpeed);
+        }, lvl.spawnInterval);
+      } else {
+        spawnTimer = setInterval(() => {
+          if (state !== STATE.PLAY) return;
+          spawnEnemy(endlessSpeed);
+        }, endlessSpawn);
+        endlessAccelTimer = setInterval(() => {
+          if (state !== STATE.PLAY || mode !== 'endless') return;
+          endlessTime++;
+          endlessSpeed = 1.0 + endlessTime * 0.06;
+          endlessSpawn = Math.max(220, 900 - endlessTime * 18);
+          if (spawnTimer) clearInterval(spawnTimer);
+          spawnTimer = setInterval(() => {
+            if (state !== STATE.PLAY) return;
+            spawnEnemy(endlessSpeed);
+          }, endlessSpawn);
+        }, 1000);
+      }
+    }
+
+    function startBoss() {
+      boss = {
+        x: canvas.width / 2 - 60, y: 60, w: 120, h: 80,
+        hp: 60, maxHp: 60, dir: 1, speed: 1.8, shootCooldown: 90
+      };
+      if (bossTimer) clearInterval(bossTimer);
+      bossTimer = setInterval(() => {
+        if (state !== STATE.PLAY || !boss) return;
+        boss.shootCooldown--;
+        if (boss.shootCooldown <= 0) {
+          bossShoot();
+          boss.shootCooldown = 70 + Math.floor(Math.random() * 40);
+        }
+      }, 16);
+    }
+
+    function bossShoot() {
+      if (!boss) return;
+      const cx = boss.x + boss.w / 2;
+      const cy = boss.y + boss.h;
+      const targetX = player.x + player.w / 2;
+      const targetY = player.y;
+      for (let i = -1; i <= 1; i++) {
+        const dx = targetX - cx + i * 40;
+        const dy = targetY - cy;
+        const len = Math.hypot(dx, dy);
+        bossBullets.push({
+          x: cx - 5, y: cy, w: 10, h: 10,
+          vx: (dx / len) * 4.5, vy: (dy / len) * 4.5
+        });
+      }
+    }
+
+    function spawnEnemy(speedBase) {
+      const w = 25 + Math.random() * 20;
+      enemies.push({ x: Math.random() * (canvas.width - w), y: -30, w: w, h: w, speed: speedBase + Math.random() * 0.7 });
+    }
+
+    function spawnPowerup() {
+      const roll = Math.random() * 100;
+      let type;
+      if (roll < 40) type = 'x2';
+      else if (roll < 60) type = 'x3';
+      else if (roll < 85) type = 'shield';
+      else type = 'life';
+      const size = 22;
+      powerups.push({ x: Math.random() * (canvas.width - size), y: -size, w: size, h: size, type: type, speed: 1.8 });
+    }
+
+    function shoot() {
+      if (state !== STATE.PLAY) return;
+      const cx = player.x + player.w / 2;
+      if (tripleShotTimer > 0) {
+        bullets.push({ x: cx - 2, y: player.y, w: 4, h: 10, vx: -2.2, vy: -8, speed: 8 });
+        bullets.push({ x: cx - 2, y: player.y, w: 4, h: 10, vx: 0,    vy: -9, speed: 9 });
+        bullets.push({ x: cx - 2, y: player.y, w: 4, h: 10, vx: 2.2,  vy: -8, speed: 8 });
+      } else if (doubleShotTimer > 0) {
+        bullets.push({ x: cx - 8, y: player.y, w: 4, h: 10, vx: 0, vy: -8.5, speed: 8.5 });
+        bullets.push({ x: cx + 4, y: player.y, w: 4, h: 10, vx: 0, vy: -8.5, speed: 8.5 });
+      } else {
+        bullets.push({ x: cx - 2, y: player.y, w: 4, h: 10, vx: 0, vy: -8, speed: 8 });
+      }
+    }
+
+    function update() {
+      if (state !== STATE.PLAY) return;
+
+      if (keys['ArrowLeft']) player.x -= player.speed;
+      if (keys['ArrowRight']) player.x += player.speed;
+      player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+
+      bullets.forEach(b => { b.x += b.vx || 0; b.y += b.vy || -b.speed; });
+      bullets = bullets.filter(b => b.y + b.h > 0 && b.x + b.w > 0 && b.x < canvas.width);
+
+      if (boss) {
+        boss.x += boss.speed * boss.dir;
+        if (boss.x <= 0) { boss.x = 0; boss.dir = 1; }
+        if (boss.x + boss.w >= canvas.width) { boss.x = canvas.width - boss.w; boss.dir = -1; }
+        if (boss.y < 40) boss.y += 0.3;
+        if (boss.y > 80) boss.y -= 0.3;
+      }
+
+      bossBullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
+      bossBullets = bossBullets.filter(b => b.y < canvas.height && b.y > -20 && b.x > -20 && b.x < canvas.width + 20);
+
+      enemies.forEach(e => e.y += e.speed);
+      powerups.forEach(p => p.y += p.speed);
+
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const b = bullets[i], e = enemies[j];
+          if (b.x < e.x + e.w && b.x + b.w > e.x && b.y < e.y + e.h && b.y + b.h > e.y) {
+            bullets.splice(i, 1); enemies.splice(j, 1);
+            const gain = mode === 'campaign' ? LEVELS[currentLevel].scorePerKill : 15;
+            score += gain; killed++; updateRecord();
+            if (mode === 'campaign' && !LEVELS[currentLevel].boss && killed >= LEVELS[currentLevel].enemiesToWin) {
+              levelComplete = true; state = STATE.LEVEL_COMPLETE; stopAllTimers(); enemies = [];
+            }
+            break;
+          }
+        }
+      }
+
+      if (boss) {
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          if (b.x < boss.x + boss.w && b.x + b.w > boss.x && b.y < boss.y + boss.h && b.y + b.h > boss.y) {
+            bullets.splice(i, 1);
+            boss.hp--;
+            score += 5; updateRecord();
+            if (boss.hp <= 0) {
+              boss = null;
+              score += 200; updateRecord();
+              victory = true; state = STATE.VICTORY; stopAllTimers();
+              return;
+            }
+          }
+        }
+      }
+
+      for (let i = powerups.length - 1; i >= 0; i--) {
+        const p = powerups[i];
+        if (p.x < player.x + player.w && p.x + p.w > player.x && p.y < player.y + player.h && p.y + p.h > player.y) {
+          applyPowerup(p.type); powerups.splice(i, 1);
+        } else if (p.y > canvas.height) { powerups.splice(i, 1); }
+      }
+
+      for (let i = bossBullets.length - 1; i >= 0; i--) {
+        const bb = bossBullets[i];
+        if (bb.x < player.x + player.w && bb.x + bb.w > player.x && bb.y < player.y + player.h && bb.y + bb.h > player.y) {
+          bossBullets.splice(i, 1);
+          if (shieldTimer > 0) {
+            lives -= 0.5;
+            if (lives <= 0) { lives = 0; gameOver = true; state = STATE.GAMEOVER; stopAllTimers(); return; }
+          } else {
+            hitPlayer();
+            if (state !== STATE.PLAY) return;
+          }
+        }
+      }
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        const hitBox = (e.y + e.h > player.y && e.x < player.x + player.w && e.x + e.w > player.x);
+        if (hitBox) {
+          if (shieldTimer > 0) { enemies.splice(i, 1); score += 5; updateRecord(); }
+          else { hitPlayer(); return; }
+        } else if (e.y > canvas.height) {
+          if (shieldTimer > 0) enemies.splice(i, 1);
+          else { hitPlayer(); return; }
+        }
+      }
+    }
+
+    function applyPowerup(type) {
+      if (type === 'x2') doubleShotTimer = 10;
+      else if (type === 'x3') tripleShotTimer = 8;
+      else if (type === 'shield') shieldTimer = 10;
+      else if (type === 'life') { lives = Math.min(5, lives + 1); }
+    }
+
+    function hitPlayer() {
+      lives--;
+      if (lives <= 0) { lives = 0; gameOver = true; state = STATE.GAMEOVER; stopAllTimers(); }
+      else { enemies = []; player.x = 240; }
+    }
+
+    // ТАЙМЕР БОНУСОВ — тикает каждую секунду, уменьшает все счётчики
+    function startGlobalTimer() {
+      if (globalTimer) clearInterval(globalTimer);
+      globalTimer = setInterval(() => {
+        if (state !== STATE.PLAY) return;
+        if (doubleShotTimer > 0) doubleShotTimer--;
+        if (tripleShotTimer > 0) tripleShotTimer--;
+        if (shieldTimer > 0) shieldTimer--;
+      }, 1000);
+    }
+
+    function drawOverlay(title, subtitle) {
+      ctx.fillStyle = 'rgba(10, 12, 20, 0.85)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = COLOR.accentSilver;
+      ctx.font = '36px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 40);
+      ctx.font = '17px monospace'; ctx.fillStyle = COLOR.text;
+      ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2 + 10);
+    }
+
+    function drawMenu() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = COLOR.accentSilver;
+      ctx.font = '34px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('СТРЕЛЯЛКА', canvas.width / 2, 80);
+      ctx.font = '20px monospace'; ctx.fillStyle = COLOR.text;
+      ctx.fillText('1 — Кампания (6 уровней + босс)', canvas.width / 2, 160);
+      ctx.fillText('2 — Бесконечный режим', canvas.width / 2, 195);
+      ctx.fillStyle = COLOR.bullet;
+      ctx.fillText('Рекорд: ' + record, canvas.width / 2, 260);
+      ctx.fillStyle = COLOR.accentBlue;
+      ctx.fillText('Макс. уровень: ' + maxLevelReached, canvas.width / 2, 290);
+      ctx.fillStyle = '#888'; ctx.font = '15px monospace';
+      ctx.fillText('C — сбросить рекорд', canvas.width / 2, 330);
+      ctx.fillStyle = COLOR.text;
+      ctx.fillText('Бонусы:', canvas.width / 2, 380);
+      ctx.fillStyle = '#ffd700'; ctx.fillText('жёлтый — x2 (частый)', canvas.width / 2, 405);
+      ctx.fillStyle = '#f80'; ctx.fillText('оранжевый — x3 веером (реже)', canvas.width / 2, 428);
+      ctx.fillStyle = COLOR.accentBlue; ctx.fillText('синий — щит', canvas.width / 2, 451);
+      ctx.fillStyle = '#3f3'; ctx.fillText('зелёный — +1 жизнь', canvas.width / 2, 474);
+      ctx.fillStyle = '#888'; ctx.font = '13px monospace';
+      ctx.fillText('← → двигаться, Пробел — стрелять', canvas.width / 2, 520);
+      ctx.fillText('R — заново, Esc — меню', canvas.width / 2, 540);
+    }
+
+    function drawShop() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = COLOR.bullet;
+      ctx.font = '32px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('МАГАЗИН', canvas.width / 2, 60);
+      ctx.fillStyle = COLOR.text; ctx.font = '18px monospace';
+      ctx.fillText('Очки: ' + score, canvas.width / 2, 100);
+      ctx.fillStyle = COLOR.accentBlue; ctx.font = '16px monospace';
+      ctx.fillText('Покупки на следующий уровень', canvas.width / 2, 130);
+      const items = [
+        { key: '1', name: '+1 жизнь (макс 5)', price: 50, have: lives, color: COLOR.accentRed },
+        { key: '2', name: 'Щит на старте',      price: 40, have: boughtShield, color: COLOR.accentBlue },
+        { key: '3', name: 'Двойной выстрел',    price: 60, have: boughtDouble, color: '#ffd700' },
+        { key: '4', name: 'Тройной (веер)',     price: 80, have: boughtTriple, color: '#f80' }
+      ];
+      items.forEach((item, i) => {
+        const y = 190 + i * 70;
+        ctx.fillStyle = item.color; ctx.font = '18px monospace'; ctx.textAlign = 'left';
+        ctx.fillText('[' + item.key + '] ' + item.name, 30, y);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = score >= item.price ? '#3f3' : '#f55';
+        ctx.fillText(item.price + ' очков', canvas.width - 30, y);
+        ctx.textAlign = 'left'; ctx.fillStyle = '#888'; ctx.font = '13px monospace';
+        ctx.fillText('куплено: ' + item.have, 30, y + 18);
+      });
+      ctx.textAlign = 'center'; ctx.fillStyle = COLOR.accentSilver; ctx.font = '18px monospace';
+      ctx.fillText('Enter — на следующий уровень', canvas.width / 2, 510);
+      ctx.fillStyle = '#888'; ctx.font = '14px monospace';
+      ctx.fillText('Esc — выйти в меню', canvas.width / 2, 540);
+    }
+
+    function drawPowerupIcon(x, y, size, type) {
+      ctx.save(); ctx.translate(x + size / 2, y + size / 2); ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = type === 'x2' ? '#ffd700' : type === 'x3' ? '#f80' : type === 'shield' ? COLOR.accentBlue : '#3f3';
+      ctx.fillRect(-size / 2, -size / 2, size, size);
+      ctx.restore();
+      ctx.fillStyle = '#000'; ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const label = type === 'x2' ? 'x2' : type === 'x3' ? 'x3' : type === 'shield' ? 'S' : '♥';
+      ctx.fillText(label, x + size / 2, y + size / 2 + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function draw() {
+      if (state === STATE.MENU) { drawMenu(); return; }
+      if (state === STATE.SHOP) { drawShop(); return; }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (boss) {
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(20, 75, canvas.width - 40, 14);
+        ctx.fillStyle = COLOR.boss;
+        ctx.fillRect(20, 75, (canvas.width - 40) * (boss.hp / boss.maxHp), 14);
+        ctx.fillStyle = '#fff'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('BOSS  ' + boss.hp + ' / ' + boss.maxHp, canvas.width / 2, 86);
+
+        ctx.fillStyle = COLOR.boss;
+        ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(boss.x + 20, boss.y + 20, 20, 20);
+        ctx.fillRect(boss.x + boss.w - 40, boss.y + 20, 20, 20);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(boss.x + 28, boss.y + 26, 6, 8);
+        ctx.fillRect(boss.x + boss.w - 32, boss.y + 26, 6, 8);
+        ctx.fillRect(boss.x + 30, boss.y + boss.h - 25, boss.w - 60, 8);
+      }
+
+      ctx.fillStyle = COLOR.bossBullet;
+      bossBullets.forEach(b => {
+        ctx.beginPath();
+        ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      if (shieldTimer > 0) {
+        ctx.strokeStyle = COLOR.accentBlue; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(player.x + player.w / 2, player.y + player.h / 2, 24, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = COLOR.player;
+      ctx.beginPath();
+      ctx.moveTo(player.x + player.w / 2, player.y);
+      ctx.lineTo(player.x, player.y + player.h);
+      ctx.lineTo(player.x + player.w, player.y + player.h);
+      ctx.closePath(); ctx.fill();
+
+      ctx.fillStyle = COLOR.bullet;
+      bullets.forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+
+      ctx.fillStyle = mode === 'endless' ? COLOR.accentRed : (currentLevel < 2 ? COLOR.enemy1 : currentLevel < 4 ? COLOR.enemy2 : COLOR.enemy3);
+      enemies.forEach(e => ctx.fillRect(e.x, e.y, e.w, e.h));
+
+      powerups.forEach(p => drawPowerupIcon(p.x, p.y, p.w, p.type));
+
+      ctx.fillStyle = COLOR.accentSilver; ctx.font = '15px monospace';
+      ctx.textAlign = 'left'; ctx.fillText('Счёт: ' + score, 10, 22);
+      ctx.textAlign = 'right'; ctx.fillText('Рекорд: ' + record, canvas.width - 10, 22);
+
+      ctx.textAlign = 'center'; ctx.fillStyle = COLOR.text;
+      if (mode === 'campaign') {
+        if (LEVELS[currentLevel].boss) {
+          ctx.fillText('УРОВЕНЬ 6 — БОСС', canvas.width / 2, 45);
+        } else {
+          ctx.fillText('Уровень ' + LEVELS[currentLevel].name + ' / 6 — ' + killed + '/' + LEVELS[currentLevel].enemiesToWin, canvas.width / 2, 45);
+        }
+      } else {
+        ctx.fillText('Бесконечный — ' + endlessTime + 'с', canvas.width / 2, 45);
+      }
+
+      ctx.textAlign = 'left'; ctx.fillStyle = COLOR.accentRed;
+      ctx.fillText('♥'.repeat(Math.max(0, Math.floor(lives))) + (lives % 1 ? '½' : ''), 10, 45);
+
+      ctx.font = '12px monospace';
+      let bx = canvas.width - 10; ctx.textAlign = 'right';
+      if (tripleShotTimer > 0) { ctx.fillStyle = '#f80'; ctx.fillText('x3: ' + tripleShotTimer + 'с', bx, 62); bx -= 70; }
+      else if (doubleShotTimer > 0) { ctx.fillStyle = '#ffd700'; ctx.fillText('x2: ' + doubleShotTimer + 'с', bx, 62); bx -= 70; }
+      if (shieldTimer > 0) { ctx.fillStyle = COLOR.accentBlue; ctx.fillText('щит: ' + shieldTimer + 'с', bx, 62); }
+
+      if (state === STATE.GAMEOVER) {
+        drawOverlay('GAME OVER', 'Счёт: ' + score + ' | Рекорд: ' + record + ' | R — заново');
+      } else if (state === STATE.LEVEL_COMPLETE) {
+        drawOverlay('УРОВЕНЬ ' + LEVELS[currentLevel].name + ' ПРОЙДЕН', 'N — магазин | R — заново | Esc — меню');
+      } else if (state === STATE.VICTORY) {
+        drawOverlay('ПОБЕДА! БОСС ПОВЕРЖЕН!', 'Счёт: ' + score + ' | Рекорд: ' + record + ' | R — заново');
+      }
+    }
+
+    function loop() { update(); draw(); requestAnimationFrame(loop); }
+    loop();
+  </script>
+</body>
+</html>
